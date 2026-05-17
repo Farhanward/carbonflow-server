@@ -1,0 +1,324 @@
+name: carbonflow-tech
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  security_opt:
+    - no-new-privileges:true
+
+networks:
+  edge:
+    driver: bridge
+  app:
+    driver: bridge
+    internal: true
+
+volumes:
+  npm_data:
+  npm_letsencrypt:
+  npm_db:
+  litecart_db:
+  litecart_html:
+  n8n_data:
+  crowdsec_data:
+  crowdsec_config:
+
+services:
+  control-panel:
+    <<: *defaults
+    image: carbonflow/control-panel:local
+    build:
+      context: ./control-panel
+    container_name: carbonflow-control-panel
+    environment:
+      TZ: ${TZ}
+      ENV_FILE: /opt/carbonflow/compose/.env
+      STACK_DIR: /opt/carbonflow/compose
+      VAULT_ROOT: /vault
+      CONTROL_PANEL_USER: ${CONTROL_PANEL_USER}
+      CONTROL_PANEL_PASSWORD: ${CONTROL_PANEL_PASSWORD}
+    volumes:
+      - .:/opt/carbonflow/compose
+      - ../scripts:/scripts:ro
+      - /vault:/vault
+      - /sys:/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8088:8088"
+    networks:
+      - edge
+      - app
+    mem_limit: 128m
+    cpus: "0.25"
+
+  release-api:
+    <<: *defaults
+    image: carbonflow/release-api:local
+    build:
+      context: ./release-api
+    container_name: carbonflow-release-api
+    environment:
+      TZ: ${TZ}
+      PRODUCTS_ROOT: /vault/products
+      RELEASE_WEBHOOK_SECRET: ${RELEASE_WEBHOOK_SECRET}
+      RELEASE_API_TOKEN: ${RELEASE_API_TOKEN}
+      RELEASE_PUBLIC_BASE_URL: https://${DOMAIN}
+      N8N_RELEASE_WEBHOOK_INTERNAL: http://n8n:5678/webhook/release-published
+    volumes:
+      - /vault/products:/vault/products
+    depends_on:
+      - n8n
+    networks:
+      - app
+    expose:
+      - "3010"
+    mem_limit: 128m
+    cpus: "0.25"
+
+  nginx-proxy-manager:
+    <<: *defaults
+    image: jc21/nginx-proxy-manager:latest
+    container_name: carbonflow-npm
+    environment:
+      TZ: ${TZ}
+      DB_MYSQL_HOST: npm-db
+      DB_MYSQL_PORT: 3306
+      DB_MYSQL_USER: npm
+      DB_MYSQL_PASSWORD: ${NPM_DB_PASSWORD}
+      DB_MYSQL_NAME: npm
+      DISABLE_IPV6: "true"
+    volumes:
+      - npm_data:/data
+      - npm_letsencrypt:/etc/letsencrypt
+    depends_on:
+      npm-db:
+        condition: service_healthy
+    networks:
+      - edge
+      - app
+    expose:
+      - "80"
+      - "81"
+      - "443"
+    mem_limit: 512m
+    cpus: "0.75"
+
+  npm-db:
+    <<: *defaults
+    image: mariadb:11.4
+    container_name: carbonflow-npm-db
+    environment:
+      TZ: ${TZ}
+      MARIADB_DATABASE: npm
+      MARIADB_USER: npm
+      MARIADB_PASSWORD: ${NPM_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${NPM_DB_ROOT_PASSWORD}
+    command:
+      - --transaction-isolation=READ-COMMITTED
+      - --innodb-buffer-pool-size=96M
+      - --max-connections=40
+      - --skip-name-resolve
+    volumes:
+      - npm_db:/var/lib/mysql
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+    cpus: "0.50"
+
+  cloudflared:
+    <<: *defaults
+    image: cloudflare/cloudflared:latest
+    container_name: carbonflow-cloudflared
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
+    depends_on:
+      - nginx-proxy-manager
+    networks:
+      - edge
+      - app
+    mem_limit: 128m
+    cpus: "0.25"
+
+  crowdsec:
+    <<: *defaults
+    image: crowdsecurity/crowdsec:latest
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    container_name: carbonflow-crowdsec
+    environment:
+      TZ: ${TZ}
+      COLLECTIONS: crowdsecurity/nginx crowdsecurity/http-cve crowdsecurity/whitelist-good-actors
+      GID: "1000"
+    volumes:
+      - crowdsec_data:/var/lib/crowdsec/data
+      - crowdsec_config:/etc/crowdsec
+      - ../config/crowdsec/acquis.yaml:/etc/crowdsec/acquis.d/npm.yaml:ro
+      - npm_data:/var/log/npm:ro
+      - /var/log:/var/log/host:ro
+    networks:
+      - app
+      - edge
+    mem_limit: 384m
+    cpus: "0.50"
+
+  ollama:
+    <<: *defaults
+    image: ollama/ollama:latest
+    container_name: carbonflow-ollama
+    environment:
+      TZ: ${TZ}
+      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_MAX_LOADED_MODELS: 1
+    volumes:
+      - /vault/ollama:/root/.ollama
+    networks:
+      - app
+    expose:
+      - "11434"
+    mem_limit: 4g
+    cpus: "3.50"
+
+  n8n:
+    <<: *defaults
+    image: n8nio/n8n:latest
+    container_name: carbonflow-n8n
+    environment:
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 168
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      RELEASE_API_TOKEN: ${RELEASE_API_TOKEN}
+    volumes:
+      - /vault/n8n:/home/node/.n8n
+      - ../workflows:/workflows:ro
+      - /vault/logs:/vault/logs:ro
+    depends_on:
+      - ollama
+    networks:
+      - app
+    expose:
+      - "5678"
+    mem_limit: 768m
+    cpus: "1.00"
+
+  litecart-db:
+    <<: *defaults
+    image: mariadb:11.4
+    container_name: carbonflow-litecart-db
+    environment:
+      TZ: ${TZ}
+      MARIADB_DATABASE: ${LITECART_DB_NAME}
+      MARIADB_USER: ${LITECART_DB_USER}
+      MARIADB_PASSWORD: ${LITECART_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${LITECART_DB_ROOT_PASSWORD}
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=60
+      - --skip-name-resolve
+    volumes:
+      - litecart_db:/var/lib/mysql
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    cpus: "0.75"
+
+  litecart:
+    <<: *defaults
+    image: carbonflow/litecart:local
+    build:
+      context: ./litecart
+    container_name: carbonflow-litecart
+    environment:
+      TZ: ${TZ}
+      LITECART_DB_HOST: litecart-db
+      LITECART_DB_NAME: ${LITECART_DB_NAME}
+      LITECART_DB_USER: ${LITECART_DB_USER}
+      LITECART_DB_PASSWORD: ${LITECART_DB_PASSWORD}
+      MOYASAR_API_KEY: ${MOYASAR_API_KEY}
+      TAP_SECRET_KEY: ${TAP_SECRET_KEY}
+    volumes:
+      - litecart_html:/var/www/html
+      - /vault/products:/vault/products:ro
+    depends_on:
+      litecart-db:
+        condition: service_healthy
+    networks:
+      - app
+    expose:
+      - "80"
+    mem_limit: 512m
+    cpus: "0.75"
+
+  telemetry-api:
+    <<: *defaults
+    image: carbonflow/telemetry-api:local
+    build:
+      context: ./telemetry-api
+    container_name: carbonflow-telemetry-api
+    environment:
+      TZ: ${TZ}
+      TELEMETRY_TOKEN: ${TELEMETRY_TOKEN}
+      VAULT_LOG_DIR: /vault/logs
+      N8N_WEBHOOK_URL_INTERNAL: http://n8n:5678/webhook/telemetry-ingest
+    volumes:
+      - /vault/logs:/vault/logs
+    depends_on:
+      - n8n
+    networks:
+      - app
+    expose:
+      - "3000"
+    mem_limit: 128m
+    cpus: "0.25"
+
+
+  cloakbrowser:
+    image: cloakhq/cloakbrowser:latest
+    container_name: carbonflow-cloakbrowser
+    restart: unless-stopped
+    command: cloakserve --port=9222
+    environment:
+      TZ: ${TZ}
+      DISPLAY: ":99"
+    networks:
+      - app
+    expose:
+      - "9222"
+    mem_limit: 1g
+    cpus: "1.50"
