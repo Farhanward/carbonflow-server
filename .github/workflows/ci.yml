@@ -1,0 +1,119 @@
+name: Stack Health CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate Compose Config
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate test .env
+        run: |
+          sed \
+            -e 's/CHANGE_ME/ci_test_value/g' \
+            -e 's|DOMAIN=.*|DOMAIN=ci.test|' \
+            -e 's|N8N_HOST=.*|N8N_HOST=n8n.ci.test|' \
+            -e 's|N8N_WEBHOOK_URL=.*|N8N_WEBHOOK_URL=https://n8n.ci.test/|' \
+            .env.example > .env
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml config --quiet
+        env:
+          COMPOSE_PROFILES: ""   # ensure ci-skip services stay off
+
+  smoke-test:
+    name: Smoke Test (DB + NPM)
+    runs-on: ubuntu-22.04
+    needs: validate
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate test .env
+        run: |
+          sed \
+            -e 's/CHANGE_ME/ci_test_value/g' \
+            -e 's|DOMAIN=.*|DOMAIN=ci.test|' \
+            -e 's|N8N_HOST=.*|N8N_HOST=n8n.ci.test|' \
+            -e 's|N8N_WEBHOOK_URL=.*|N8N_WEBHOOK_URL=https://n8n.ci.test/|' \
+            -e 's|NPM_DB_PASSWORD=.*|NPM_DB_PASSWORD=npm_ci_pass|' \
+            -e 's|NPM_DB_ROOT_PASSWORD=.*|NPM_DB_ROOT_PASSWORD=npm_ci_root|' \
+            -e 's|LITECART_DB_NAME=.*|LITECART_DB_NAME=litecart_ci|' \
+            -e 's|LITECART_DB_USER=.*|LITECART_DB_USER=litecart_ci|' \
+            -e 's|LITECART_DB_PASSWORD=.*|LITECART_DB_PASSWORD=litecart_ci_pass|' \
+            -e 's|LITECART_DB_ROOT_PASSWORD=.*|LITECART_DB_ROOT_PASSWORD=litecart_ci_root|' \
+            .env.example > .env
+
+      # ── Start only the services we can test without external deps ──────────
+      - name: Start npm-db + litecart-db + nginx-proxy-manager
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.ci.yml \
+            up -d npm-db litecart-db nginx-proxy-manager
+        env:
+          COMPOSE_PROFILES: ""
+
+      # ── Wait for MariaDB health checks ─────────────────────────────────────
+      - name: Wait for npm-db to become healthy
+        run: |
+          echo "Waiting for npm-db..."
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' carbonflow-npm-db 2>/dev/null || echo "missing")
+            echo "  attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] && { echo "npm-db is healthy ✓"; break; }
+            [ "$i" -eq 30 ] && { echo "TIMEOUT: npm-db never became healthy"; docker logs carbonflow-npm-db --tail 30; exit 1; }
+            sleep 5
+          done
+
+      - name: Wait for litecart-db to become healthy
+        run: |
+          echo "Waiting for litecart-db..."
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' carbonflow-litecart-db 2>/dev/null || echo "missing")
+            echo "  attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] && { echo "litecart-db is healthy ✓"; break; }
+            [ "$i" -eq 30 ] && { echo "TIMEOUT: litecart-db never became healthy"; docker logs carbonflow-litecart-db --tail 30; exit 1; }
+            sleep 5
+          done
+
+      - name: Wait for nginx-proxy-manager UI (port 81)
+        run: |
+          echo "Waiting for NPM admin UI..."
+          for i in $(seq 1 24); do
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:81 2>/dev/null || echo "000")
+            echo "  attempt $i: HTTP $HTTP"
+            # NPM returns 200 or 302 on first boot
+            [[ "$HTTP" =~ ^(200|302|301)$ ]] && { echo "NPM UI responding ✓ (HTTP $HTTP)"; break; }
+            [ "$i" -eq 24 ] && { echo "TIMEOUT: NPM UI never responded"; docker logs carbonflow-npm --tail 40; exit 1; }
+            sleep 5
+          done
+
+      # ── Service status report ──────────────────────────────────────────────
+      - name: Show container status
+        if: always()
+        run: |
+          echo "=== Container Status ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps
+          echo ""
+          echo "=== npm-db logs (last 20) ==="
+          docker logs carbonflow-npm-db --tail 20 2>&1 || true
+          echo ""
+          echo "=== litecart-db logs (last 20) ==="
+          docker logs carbonflow-litecart-db --tail 20 2>&1 || true
+          echo ""
+          echo "=== nginx-proxy-manager logs (last 20) ==="
+          docker logs carbonflow-npm --tail 20 2>&1 || true
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v --remove-orphans 2>/dev/null || true

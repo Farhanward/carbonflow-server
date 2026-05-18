@@ -1,0 +1,69 @@
+# CI override — used alongside docker-compose.yml in GitHub Actions
+# Stubs custom-build services, skips heavy/external-dependent ones
+
+services:
+
+  # ── Custom-build → lightweight stub ───────────────────────────────────────
+  control-panel:
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    build: null
+    volumes: []
+    ports:
+      - "8088:8088"
+    environment:
+      TZ: "UTC"
+    depends_on: {}
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+      retries: 3
+
+  release-api:
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    build: null
+    volumes: []
+    depends_on: {}
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+      retries: 3
+
+  litecart:
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    build: null
+    volumes: []
+    depends_on: {}
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+      retries: 3
+
+  telemetry-api:
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    build: null
+    volumes: []
+    depends_on: {}
+    healthcheck:
+      test: ["CMD", "echo", "ok"]
+      interval: 5s
+      retries: 3
+
+  # ── Skip external/heavy services via inactive profile ─────────────────────
+  cloudflared:
+    profiles: [ci-skip]
+
+  crowdsec:
+    profiles: [ci-skip]
+
+  ollama:
+    profiles: [ci-skip]
+
+  cloakbrowser:
+    profiles: [ci-skip]
+
+  n8n:
+    profiles: [ci-skip]
