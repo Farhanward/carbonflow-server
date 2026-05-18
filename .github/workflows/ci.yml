@@ -87,13 +87,13 @@ jobs:
 
       - name: Wait for nginx-proxy-manager UI (port 81)
         run: |
-          echo "Waiting for NPM admin UI..."
-          for i in $(seq 1 24); do
+          echo "Waiting for NPM admin UI (DB migration on first boot can take ~2 min)..."
+          for i in $(seq 1 48); do
             HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:81 2>/dev/null || echo "000")
             echo "  attempt $i: HTTP $HTTP"
             # NPM returns 200 or 302 on first boot
             [[ "$HTTP" =~ ^(200|302|301)$ ]] && { echo "NPM UI responding ✓ (HTTP $HTTP)"; break; }
-            [ "$i" -eq 24 ] && { echo "TIMEOUT: NPM UI never responded"; docker logs carbonflow-npm --tail 40; exit 1; }
+            [ "$i" -eq 48 ] && { echo "TIMEOUT: NPM UI never responded"; docker logs carbonflow-npm --tail 40; exit 1; }
             sleep 5
           done
 

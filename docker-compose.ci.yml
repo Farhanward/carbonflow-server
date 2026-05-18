@@ -36,6 +36,13 @@ services:
     volumes: []
     depends_on: {}
 
+  # ── Expose NPM admin port to host for health check ────────────────────────
+  nginx-proxy-manager:
+    ports:
+      - "80:80"
+      - "81:81"
+      - "443:443"
+
   # ── Heavy / external-dependent services → busybox stub ────────────────────
   cloudflared:
     image: busybox
