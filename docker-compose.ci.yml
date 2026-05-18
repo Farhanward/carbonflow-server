@@ -1,9 +1,9 @@
-# CI override — used alongside docker-compose.yml in GitHub Actions
-# Stubs custom-build services, skips heavy/external-dependent ones
+# CI override — stubs ALL non-testable services with busybox
+# Core services tested for real: npm-db, litecart-db, nginx-proxy-manager
 
 services:
 
-  # ── Custom-build → lightweight stub ───────────────────────────────────────
+  # ── Custom-build services → busybox stub ──────────────────────────────────
   control-panel:
     image: busybox
     command: ["tail", "-f", "/dev/null"]
@@ -14,10 +14,6 @@ services:
     environment:
       TZ: "UTC"
     depends_on: {}
-    healthcheck:
-      test: ["CMD", "echo", "ok"]
-      interval: 5s
-      retries: 3
 
   release-api:
     image: busybox
@@ -25,10 +21,6 @@ services:
     build: null
     volumes: []
     depends_on: {}
-    healthcheck:
-      test: ["CMD", "echo", "ok"]
-      interval: 5s
-      retries: 3
 
   litecart:
     image: busybox
@@ -36,10 +28,6 @@ services:
     build: null
     volumes: []
     depends_on: {}
-    healthcheck:
-      test: ["CMD", "echo", "ok"]
-      interval: 5s
-      retries: 3
 
   telemetry-api:
     image: busybox
@@ -47,23 +35,37 @@ services:
     build: null
     volumes: []
     depends_on: {}
-    healthcheck:
-      test: ["CMD", "echo", "ok"]
-      interval: 5s
-      retries: 3
 
-  # ── Skip external/heavy services via inactive profile ─────────────────────
+  # ── Heavy / external-dependent services → busybox stub ────────────────────
   cloudflared:
-    profiles: [ci-skip]
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    depends_on: {}
 
   crowdsec:
-    profiles: [ci-skip]
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    volumes: []
+    environment:
+      TZ: "UTC"
 
   ollama:
-    profiles: [ci-skip]
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    volumes: []
+    environment:
+      TZ: "UTC"
 
   cloakbrowser:
-    profiles: [ci-skip]
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    environment:
+      TZ: "UTC"
 
   n8n:
-    profiles: [ci-skip]
+    image: busybox
+    command: ["tail", "-f", "/dev/null"]
+    volumes: []
+    depends_on: {}
+    environment:
+      TZ: "UTC"
