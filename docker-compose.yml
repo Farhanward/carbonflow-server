@@ -307,6 +307,26 @@ services:
     mem_limit: 128m
     cpus: "0.25"
 
+  claude-agent:
+    <<: *defaults
+    image: carbonflow/claude-agent:local
+    build:
+      context: ./telegram-openai-bot
+    container_name: carbonflow-claude-agent
+    environment:
+      TZ: ${TZ}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-4-5}
+      BOT_STATE_FILE: /data/state.json
+    volumes:
+      - /vault/claude-agent:/data
+    networks:
+      - edge
+    mem_limit: 256m
+    cpus: "0.25"
+
 
   cloakbrowser:
     image: cloakhq/cloakbrowser:latest
