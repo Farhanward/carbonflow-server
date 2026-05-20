@@ -10,6 +10,45 @@ const webhookSecret = process.env.RELEASE_WEBHOOK_SECRET || "";
 const apiToken = process.env.RELEASE_API_TOKEN || "";
 const publicBaseUrl = (process.env.RELEASE_PUBLIC_BASE_URL || "https://carbonflows.store").replace(/\/$/, "");
 const n8nReleaseWebhook = process.env.N8N_RELEASE_WEBHOOK_INTERNAL || "";
+const rateWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || 120);
+const rateBuckets = new Map();
+
+app.disable("x-powered-by");
+
+app.use((req, res, next) => {
+  res.set({
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "cache-control": req.method === "GET" && req.path.includes("/download/") ? "private" : "no-store"
+  });
+  next();
+});
+
+app.use((req, res, next) => {
+  const now = Date.now();
+  const key = `${req.ip}:${req.path}`;
+  const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + rateWindowMs };
+  if (bucket.resetAt <= now) {
+    bucket.count = 0;
+    bucket.resetAt = now + rateWindowMs;
+  }
+  bucket.count += 1;
+  rateBuckets.set(key, bucket);
+
+  if (bucket.count > rateLimitMax) {
+    return res.status(429).json({ ok: false, error: "rate limit exceeded" });
+  }
+  next();
+});
+
+function asyncRoute(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
 
 function cleanSegment(value, fallback) {
   const normalized = String(value || fallback)
@@ -113,25 +152,25 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "carbonflow-release-api" });
 });
 
-app.post("/webhooks/github", express.raw({ type: "application/json", limit: "50mb" }), async (req, res) => {
+app.post("/webhooks/github", express.raw({ type: "application/json", limit: "50mb" }), asyncRoute(async (req, res) => {
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
   if (!verifySignature(req, rawBody)) {
     return res.status(401).json({ ok: false, error: "invalid signature" });
   }
   const release = await persistRelease(JSON.parse(rawBody.toString("utf8")));
   res.status(202).json({ ok: true, release });
-});
+}));
 
 app.use(express.json({ limit: "50mb" }));
 
-app.get("/v1/apps/:appName/versions", async (req, res) => {
+app.get("/v1/apps/:appName/versions", asyncRoute(async (req, res) => {
   const appName = cleanSegment(req.params.appName, "app");
   const releasesFile = path.join(productsRoot, appName, "releases.json");
   const releases = await readJson(releasesFile, []);
   res.json({ ok: true, appName, releases });
-});
+}));
 
-app.get("/v1/apps/:appName/latest", async (req, res) => {
+app.get("/v1/apps/:appName/latest", asyncRoute(async (req, res) => {
   const appName = cleanSegment(req.params.appName, "app");
   const platform = req.query.platform ? cleanSegment(req.query.platform, "any") : "";
   const currentVersion = req.query.version || "0.0.0";
@@ -149,19 +188,32 @@ app.get("/v1/apps/:appName/latest", async (req, res) => {
     updateAvailable: Boolean(latest && compareSemver(latest.version, currentVersion) > 0),
     latest
   });
-});
+}));
 
-app.get("/v1/download/:appName/:version/:fileName", async (req, res) => {
+app.get("/v1/download/:appName/:version/:fileName", asyncRoute(async (req, res) => {
   const appName = cleanSegment(req.params.appName, "app");
   const version = cleanSegment(req.params.version, "0.0.0");
   const fileName = cleanSegment(req.params.fileName, "artifact.bin");
   const artifact = path.join(productsRoot, appName, version, fileName);
-  res.download(artifact);
-});
+  await fs.access(artifact);
+  res.download(artifact, fileName);
+}));
 
-app.post("/v1/releases", requireToken, async (req, res) => {
+app.post("/v1/releases", requireToken, asyncRoute(async (req, res) => {
   const release = await persistRelease(req.body);
   res.status(202).json({ ok: true, release });
+}));
+
+app.use((error, _req, res, _next) => {
+  const badJson = error instanceof SyntaxError && "body" in error;
+  const missingFile = error && error.code === "ENOENT";
+  const status = badJson ? 400 : missingFile ? 404 : 500;
+  res.status(status).json({
+    ok: false,
+    error: badJson ? "invalid json" : missingFile ? "artifact not found" : "internal server error"
+  });
 });
 
-app.listen(port, "0.0.0.0");
+app.listen(port, "0.0.0.0", () => {
+  console.log(`CarbonFlow release API listening on ${port}`);
+});
