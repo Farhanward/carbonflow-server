@@ -204,6 +204,122 @@ app.post("/v1/releases", requireToken, asyncRoute(async (req, res) => {
   res.status(202).json({ ok: true, release });
 }));
 
+// ── Tauri v2 auto-update endpoint ────────────────────────────────────────────
+const GITHUB_APP_REPO_MAP = {
+  "carbonledger":   "carbon-ledger",
+  "carbonqueue":    "carbon-queue",
+  "carbonmind-ai":  "carbon-mind-ai",
+  "growbox-pro":    "growbox-pro"
+};
+
+app.get("/update/:app/:target/:version", asyncRoute(async (req, res) => {
+  const appSlug    = String(req.params.app    || "").toLowerCase();
+  const target     = String(req.params.target || "");
+  const currentVer = String(req.params.version || "0.0.0");
+
+  const repoName = GITHUB_APP_REPO_MAP[appSlug];
+  if (!repoName) {
+    return res.status(404).json({ ok: false, error: "unknown app" });
+  }
+
+  // Fetch latest GitHub release
+  const ghUrl = `https://api.github.com/repos/Farhanward/${repoName}/releases/latest`;
+  let ghRes;
+  try {
+    ghRes = await fetch(ghUrl, {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "CarbonFlow-UpdateServer/1.0"
+      }
+    });
+  } catch {
+    return res.status(204).end();
+  }
+
+  if (!ghRes.ok) {
+    // No releases yet or rate-limited — signal no update
+    return res.status(204).end();
+  }
+
+  const ghRelease = await ghRes.json();
+  const latestTag = String(ghRelease.tag_name || "").replace(/^v/, "");
+
+  // Compare versions — no update if same or client is newer
+  if (compareSemver(latestTag, currentVer) <= 0) {
+    return res.status(204).end();
+  }
+
+  const assets = Array.isArray(ghRelease.assets) ? ghRelease.assets : [];
+
+  // Helper: find asset by suffix
+  const findAsset = (suffix) =>
+    assets.find((a) => typeof a.name === "string" && a.name.endsWith(suffix));
+
+  // Helper: fetch sig file content
+  async function fetchSig(url) {
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": "CarbonFlow-UpdateServer/1.0" } });
+      return r.ok ? await r.text() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const platforms = {};
+
+  // Windows x86_64
+  const winAsset    = findAsset(".nsis.zip");
+  const winSigAsset = findAsset(".nsis.zip.sig");
+  if (winAsset && winSigAsset) {
+    const sig = await fetchSig(winSigAsset.browser_download_url);
+    if (sig) {
+      platforms["windows-x86_64"] = {
+        signature: sig.trim(),
+        url: winAsset.browser_download_url
+      };
+    }
+  }
+
+  // macOS aarch64 (Apple Silicon)
+  const macAsset    = findAsset(".app.tar.gz");
+  const macSigAsset = findAsset(".app.tar.gz.sig");
+  if (macAsset && macSigAsset) {
+    const sig = await fetchSig(macSigAsset.browser_download_url);
+    if (sig) {
+      platforms["darwin-aarch64"] = {
+        signature: sig.trim(),
+        url: macAsset.browser_download_url
+      };
+    }
+  }
+
+  // macOS x86_64 (Intel) — look for explicit x86_64 variant
+  const macIntelAsset    = findAsset("x86_64.app.tar.gz");
+  const macIntelSigAsset = findAsset("x86_64.app.tar.gz.sig");
+  if (macIntelAsset && macIntelSigAsset) {
+    const sig = await fetchSig(macIntelSigAsset.browser_download_url);
+    if (sig) {
+      platforms["darwin-x86_64"] = {
+        signature: sig.trim(),
+        url: macIntelAsset.browser_download_url
+      };
+    }
+  }
+
+  // If we found no signed artifacts yet, signal no update gracefully
+  if (Object.keys(platforms).length === 0) {
+    return res.status(204).end();
+  }
+
+  return res.json({
+    version:  latestTag,
+    notes:    ghRelease.body || "",
+    pub_date: ghRelease.published_at || new Date().toISOString(),
+    platforms
+  });
+}));
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.use((error, _req, res, _next) => {
   const badJson = error instanceof SyntaxError && "body" in error;
   const missingFile = error && error.code === "ENOENT";
